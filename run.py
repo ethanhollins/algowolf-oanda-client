@@ -1,0 +1,265 @@
+import sys
+import socketio
+import os
+import json
+import traceback
+from app.oanda import Oanda
+from app.db import Database
+
+
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+'''
+Utilities
+'''
+class UserContainer(object):
+
+	def __init__(self, sio, db, config):
+		self.sio = sio
+		self.db = db
+		self.config = config
+		self.parent = None
+		self.users = {}
+
+
+	def getSio(self):
+		return self.sio
+
+
+	def getConfig(self):
+		return self.config
+
+
+	def setParent(self, parent):
+		self.parent = parent
+
+
+	def getParent(self):
+		return self.parent
+
+
+	def addUser(self, user_id, broker_id, key, is_demo, accounts, is_parent, is_dummy):
+		if broker_id not in self.users:
+			self.users[broker_id] = Oanda(
+				self, user_id, broker_id, key, is_demo, accounts, is_parent, is_dummy
+			)
+			if is_parent:
+				self.parent = self.users[broker_id]
+
+		return self.users[broker_id]
+
+
+	def deleteUser(self, broker_id):
+		if broker_id in self.users:
+			del self.users[broker_id]
+
+
+	def getUser(self, broker_id):
+		return self.users.get(broker_id)
+
+
+def getConfig():
+	path = os.path.join(ROOT_DIR, 'instance/config.json')
+	if os.path.exists(path):
+		with open(path, 'r') as f:
+			return json.load(f)
+	else:
+		raise Exception('Config file does not exist.')
+
+
+'''
+Initialize
+'''
+
+config = getConfig()
+sio = socketio.Client()
+db = Database(config)
+user_container = UserContainer(sio, db, config)
+
+'''
+Socket IO functions
+'''
+
+def sendResponse(msg_id, res):
+	res = {
+		'msg_id': msg_id,
+		'result': res
+	}
+
+	sio.emit(
+		'broker_res', 
+		res, 
+		namespace='/broker'
+	)
+
+
+def onAddUser(user_id, broker_id, key, is_demo, accounts, is_parent, is_dummy):
+	user = user_container.addUser(
+		user_id, broker_id, key, is_demo, accounts, is_parent, is_dummy
+	)
+
+	return {
+		'completed': True
+	}
+
+
+def onDeleteUser(broker_id):
+	user_container.deleteUser(broker_id)
+
+	return {
+		'completed': True
+	}
+
+
+def getUser(broker_id):
+	return user_container.getUser(broker_id)
+
+
+def getParent():
+	return user_container.getParent()
+
+
+def getUserTokens(broker_id):
+	user = getUser(broker_id)
+
+	if user and user.is_auth:
+		return {
+			'access_token': user.access_token,
+			'refresh_token': user.refresh_token
+		}
+
+	else:
+		return {
+			'error': 'Not Authorised'
+		}
+
+
+# Download Historical Data EPT
+def _download_historical_data_broker( 
+	user, product, period, tz='Europe/London', 
+	start=None, end=None, count=None,
+	**kwargs
+):
+	return user._download_historical_data_broker(
+		product, period, tz='Europe/London', 
+		start=start, end=end, count=count,
+		**kwargs
+	)
+
+
+def _subscribe_chart_updates(user, msg_id, instrument):
+	user._subscribe_chart_updates(msg_id, instrument)
+
+	return {
+		'completed': True
+	}
+
+
+# Create Position EPT
+
+
+
+# Modify Position EPT
+
+# Delete Position EPT
+
+# Create Order EPT
+
+# Modify Order EPT
+
+# Delete Order EPT
+
+# Get Account Details EPT
+
+# Get All Accounts EPT
+
+
+@sio.on('connect', namespace='/broker')
+def onConnect():
+	print('CONNECTED!', flush=True)
+
+
+@sio.on('disconnect', namespace='/broker')
+def onDisconnect():
+	print('DISCONNECTED', flush=True)
+
+
+@sio.on('broker_cmd', namespace='/broker')
+def onCommand(data):
+	print(f'COMMAND: {data}', flush=True)
+
+	try:
+		cmd = data.get('cmd')
+		broker = data.get('broker')
+		broker_id = data.get('broker_id')
+
+		if broker_id is None:
+			user = getParent()
+		else:
+			user = getUser(broker_id)
+
+		if broker == 'oanda':
+			res = {}
+			if cmd == 'add_user':
+				res = onAddUser(*data.get('args'), **data.get('kwargs'))
+
+			elif cmd == '_download_historical_data_broker':
+				res = _download_historical_data_broker(user, *data.get('args'), **data.get('kwargs'))
+
+			elif cmd == '_subscribe_chart_updates':
+				res = _subscribe_chart_updates(user, *data.get('args'), **data.get('kwargs'))
+
+			elif cmd == '_subscribe_account_updates':
+				res = user._subscribe_account_updates(*data.get('args'), **data.get('kwargs'))
+
+			elif cmd == '_get_all_positions':
+				res = user._get_all_positions(*data.get('args'), **data.get('kwargs'))
+
+			elif cmd == '_get_all_orders':
+				res = user._get_all_orders(*data.get('args'), **data.get('kwargs'))
+
+			elif cmd == 'createPosition':
+				res = user.createPosition(*data.get('args'), **data.get('kwargs'))
+
+			elif cmd == 'modifyPosition':
+				res = user.modifyPosition(*data.get('args'), **data.get('kwargs'))
+
+			elif cmd == 'deletePosition':
+				res = user.deletePosition(*data.get('args'), **data.get('kwargs'))
+
+			elif cmd == 'createOrder':
+				res = user.createOrder(*data.get('args'), **data.get('kwargs'))
+
+			elif cmd == 'modifyOrder':
+				res = user.modifyOrder(*data.get('args'), **data.get('kwargs'))
+
+			elif cmd == 'deleteOrder':
+				res = user.deleteOrder(*data.get('args'), **data.get('kwargs'))
+
+
+
+			sendResponse(data.get('msg_id'), res)
+
+	except Exception as e:
+		print(traceback.format_exc(), flush=True)
+		sendResponse(data.get('msg_id'), {
+			'error': str(e)
+		})
+
+
+def createApp():
+	print('CREATING APP')
+	sio.connect(
+		config['STREAM_URL'], 
+		headers={
+			'Broker': 'oanda'
+		}, 
+		namespaces=['/broker']
+	)
+
+	return sio
+
+
+if __name__ == '__main__':
+	sio = createApp()
+	print('DONE')
