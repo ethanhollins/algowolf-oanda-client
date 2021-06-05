@@ -227,6 +227,12 @@ def onCommand(data):
 			elif cmd == 'deletePosition':
 				res = user.deletePosition(*data.get('args'), **data.get('kwargs'))
 
+			elif cmd == 'getAllAccounts':
+				res = user.getAllAccounts(*data.get('args'), **data.get('kwargs'))
+
+			elif cmd == 'getAccountInfo':
+				res = user.getAccountInfo(*data.get('args'), **data.get('kwargs'))
+
 			elif cmd == 'createOrder':
 				res = user.createOrder(*data.get('args'), **data.get('kwargs'))
 
@@ -249,13 +255,16 @@ def onCommand(data):
 
 def createApp():
 	print('CREATING APP')
-	sio.connect(
-		config['STREAM_URL'], 
-		headers={
-			'Broker': 'oanda'
-		}, 
-		namespaces=['/broker']
-	)
+	try:
+		sio.connect(
+			config['STREAM_URL'], 
+			headers={
+				'Broker': 'oanda'
+			}, 
+			namespaces=['/broker']
+		)
+	except Exception:
+		return createApp()
 
 	return sio
 
