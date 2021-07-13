@@ -45,6 +45,8 @@ class UserContainer(object):
 			)
 			if is_parent:
 				self.parent = self.users[broker_id]
+		else:
+			self.users[broker_id].set(user_id, broker_id, key, is_demo, accounts, is_parent, is_dummy)
 
 		return self.users[broker_id]
 
