@@ -257,16 +257,18 @@ def onCommand(data):
 
 def createApp():
 	print('CREATING APP')
-	try:
-		sio.connect(
-			config['STREAM_URL'], 
-			headers={
-				'Broker': 'oanda'
-			}, 
-			namespaces=['/broker']
-		)
-	except Exception:
-		return createApp()
+	while True:
+		try:
+			sio.connect(
+				config['STREAM_URL'], 
+				headers={
+					'Broker': 'oanda'
+				}, 
+				namespaces=['/broker']
+			)
+			break
+		except Exception:
+			pass
 
 	return sio
 
