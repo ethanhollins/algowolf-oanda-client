@@ -359,6 +359,14 @@ class Oanda(object):
 		else:
 			return None
 
+	def authCheck(self, account_id):
+		result = self._get_all_positions(account_id)
+
+		if result is not None:
+			return {'result': True}
+		else:
+			return {'result': False}
+
 
 	def createPosition(self,
 		product, lotsize, direction,

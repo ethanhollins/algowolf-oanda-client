@@ -244,7 +244,8 @@ def onCommand(data):
 			elif cmd == 'deleteOrder':
 				res = user.deleteOrder(*data.get('args'), **data.get('kwargs'))
 
-
+			elif cmd == 'authCheck':
+				res = user.authCheck(*data.get('args'), **data.get('kwargs'))
 
 			sendResponse(data.get('msg_id'), res)
 
