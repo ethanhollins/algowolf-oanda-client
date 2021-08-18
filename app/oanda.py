@@ -447,7 +447,9 @@ class Oanda(object):
 				data=json.dumps(payload)
 			)
 		else:
-			raise Exception('No specified stop loss or take profit to modify.')
+			return {'status': 400, 'result': {
+				"message": "Stop loss or Take profit not specified or unchanged."
+			}}
 
 		result = {}
 		status_code = res.status_code
