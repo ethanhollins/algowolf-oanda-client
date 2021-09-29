@@ -112,32 +112,6 @@ class Oanda(object):
 		)
 
 
-	def _periodic_check(self):
-		TWENTY_SECONDS = 20
-		self._last_update = time.time()
-		# Check most recent Oanda `HEARTBEAT` was received or reconnect
-		while self.is_running:
-			if time.time() - self._last_update > TWENTY_SECONDS:
-				print('RECONNECT', flush=True)
-				if self._is_connected:
-					self._is_connected = False
-					# Run disconnected callback
-					# self.handleOnSessionStatus({
-					# 	'broker': self.name,
-					# 	'timestamp': math.floor(time.time()),
-					# 	'type': 'disconnected',
-					# 	'message': 'The session has been disconnected.'
-					# })
-
-					# Perform periodic refresh
-					self._reconnect()
-			time.sleep(5)
-
-		for sub in self._subscriptions:
-			for i in sub.res:
-				i.close()
-
-
 	def _send_response(self, msg_id, res):
 		res = {
 			'msg_id': msg_id,

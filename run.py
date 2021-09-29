@@ -3,6 +3,7 @@ import socketio
 import os
 import json
 import traceback
+import time
 from app.oanda import Oanda
 from app.db import Database
 
@@ -246,6 +247,12 @@ def onCommand(data):
 
 			elif cmd == 'authCheck':
 				res = user.authCheck(*data.get('args'), **data.get('kwargs'))
+
+			elif cmd == 'heartbeat':
+				if user is not None:
+					res = { "result": True }
+				else:
+					res = { "result": False }
 
 			sendResponse(data.get('msg_id'), res)
 
