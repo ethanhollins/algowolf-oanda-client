@@ -6,6 +6,7 @@ import time
 import math
 import traceback
 import dateutil.parser
+import shortuuid
 from urllib.request import urlopen, Request
 from urllib.parse import urlencode
 from copy import copy
@@ -50,11 +51,12 @@ class Subscription(object):
 class Oanda(object):
 
 	def __init__(self, 
-		container, user_id, broker_id, key, is_demo, accounts={}, is_parent=False, is_dummy=False
+		container, user_id, strategy_id, broker_id, key, is_demo, accounts={}, is_parent=False, is_dummy=False
 	):
 
 		self.container = container
 		self.userId = user_id
+		self.strategyId = strategy_id
 		self.brokerId = broker_id
 		self.accounts = accounts
 		self._key = key
@@ -84,6 +86,10 @@ class Oanda(object):
 
 		self._last_update = time.time()
 		self._subscriptions = []
+
+		self._account_update_queue = []
+
+		Thread(target=self._handle_account_updates).start()
 
 
 	def set(self, user_id, broker_id, key, is_demo, accounts, is_parent, is_dummy):
@@ -340,6 +346,301 @@ class Oanda(object):
 			return {'result': True}
 		else:
 			return {'result': False}
+
+
+	def _handle_order_create(self, res):
+		oanda_id = res.get('id')
+		result = {}
+
+		if res.get('type') == 'LIMIT_ORDER':
+			order_type = tl.LIMIT_ORDER
+		elif res.get('type') == 'STOP_ORDER':
+			order_type = tl.STOP_ORDER
+		else:
+			return result
+
+		order_id = res.get('id')
+		account_id = res.get('accountID')
+		product = res.get('instrument')
+		direction = tl.LONG if float(res.get('units')) > 0 else tl.SHORT
+		lotsize = self.convertToLotsize(abs(float(res.get('units'))))
+		entry_price = float(res.get('price'))
+
+		sl = None
+		if res.get('stopLossOnFill'):
+			if res['stopLossOnFill'].get('price'):
+				sl = float(res['stopLossOnFill'].get('price'))
+			elif res['stopLossOnFill'].get('distance'):
+				if direction == tl.LONG:
+					sl = entry_price + float(res['stopLossOnFill'].get('distance'))
+				else:
+					sl = entry_price - float(res['stopLossOnFill'].get('distance'))
+			
+		tp = None
+		if res.get('takeProfitOnFill'):
+			tp = float(res['takeProfitOnFill'].get('price'))
+
+		ts = tl.convertTimeToTimestamp(datetime.strptime(
+			res.get('time').split('.')[0], '%Y-%m-%dT%H:%M:%S'
+		))
+
+		order = tl.Order(
+			self,
+			order_id, account_id, product,
+			order_type, direction, lotsize,
+			entry_price, sl, tp, ts
+		)
+
+		self.appendDbOrder(order)
+
+		result[self.generateReference()] = {
+			'timestamp': ts,
+			'type': order_type,
+			'accepted': True,
+			'item': order
+		}
+
+		# Add update to handled
+		# self._handled[oanda_id] = result
+		handled_id = oanda_id
+
+		return result, handled_id
+
+
+	def _handle_order_fill(self, account_id, res):
+		# Retrieve position information
+		oanda_id = res.get('id')
+		result = {}
+
+		ts = tl.convertTimeToTimestamp(datetime.strptime(
+			res.get('time').split('.')[0], '%Y-%m-%dT%H:%M:%S'
+		))
+
+		from_order = self.getOrderByID(res.get('orderID'))
+		if from_order is not None:
+			self.deleteDbOrder(from_order["order_id"])
+
+			self.handleOnTrade(account_id, {
+				self.generateReference(): {
+					'timestamp': from_order["close_time"],
+					'type': tl.ORDER_CANCEL,
+					'accepted': True,
+					'item': from_order
+				}
+			})
+
+		if res.get('tradeOpened'):
+			order_id = res['tradeOpened'].get('tradeID')
+
+			account_id = res['accountID']
+			product = res.get('instrument')
+			direction = tl.LONG if float(res['tradeOpened'].get('units')) > 0 else tl.SHORT
+			lotsize = self.convertToLotsize(abs(float(res['tradeOpened'].get('units'))))
+			entry_price = float(res.get('price'))
+			
+			if res.get('reason') == 'LIMIT_ORDER':
+				order_type = tl.LIMIT_ENTRY
+			elif res.get('reason') == 'STOP_ORDER':
+				order_type = tl.STOP_ENTRY
+			else:
+				order_type = tl.MARKET_ENTRY
+
+
+			pos = tl.Position(
+				self,
+				order_id, account_id, product,
+				order_type, direction, lotsize,
+				entry_price, None, None, ts
+			)
+
+			self.appendDbPosition(pos)
+
+			result[self.generateReference()] = {
+				'timestamp': ts,
+				'type': order_type,
+				'accepted': True,
+				'item': pos
+			}
+
+		if res.get('tradeReduced'):
+			order_id = res['tradeReduced'].get('tradeID')
+			pos = self.getPositionByID(order_id)
+
+			if pos is not None:
+				cpy = tl.Position.fromDict(self, pos)
+				cpy.lotsize = self.convertToLotsize(abs(float(res['tradeReduced'].get('units'))))
+				cpy.close_price = float(res['tradeReduced'].get('price'))
+				cpy.close_time = tl.convertTimeToTimestamp(datetime.strptime(
+					res.get('time').split('.')[0], '%Y-%m-%dT%H:%M:%S'
+				))
+
+				# Modify open position
+				pos["lotsize"] -= self.convertToLotsize(abs(float(res['tradeReduced'].get('units'))))
+				self.replaceDbPosition(pos)
+
+				result[self.generateReference()] = {
+					'timestamp': ts,
+					'type': tl.POSITION_CLOSE,
+					'accepted': True,
+					'item': cpy
+				}
+
+		if res.get('tradesClosed'):
+			if res.get('reason') == 'STOP_LOSS_ORDER':
+				order_type = tl.STOP_LOSS
+			elif res.get('reason') == 'TAKE_PROFIT_ORDER':
+				order_type = tl.TAKE_PROFIT
+			else:
+				order_type = tl.POSITION_CLOSE
+
+			for i in range(len(res['tradesClosed'])):
+				trade = res['tradesClosed'][i]
+				order_id = trade.get('tradeID')
+				pos = self.getPositionByID(order_id)
+				if pos is not None:
+					pos["close_price"] = float(trade.get('price'))
+					pos["close_time"] = tl.convertTimeToTimestamp(datetime.strptime(
+						res.get('time').split('.')[0], '%Y-%m-%dT%H:%M:%S'
+					))
+
+					result[self.generateReference()] = {
+						'timestamp': ts,
+						'type': order_type,
+						'accepted': True,
+						'item': pos
+					}
+					self.deleteDbPosition(pos["order_id"])
+
+
+		# Add update to handled
+		# self._handled[oanda_id] = result
+
+		return result, oanda_id
+
+
+	def _handle_order_cancel(self, res):
+		oanda_id = res.get('id')
+		handled_id = None
+		result = {}
+
+		order_id = res.get('orderID') 
+		order = self.getOrderByID(order_id)
+
+		ts = tl.convertTimeToTimestamp(datetime.strptime(
+			res.get('time').split('.')[0], '%Y-%m-%dT%H:%M:%S'
+		))
+		if order is not None:
+			order["close_time"] = ts
+			self.deleteDbOrder(order["order_id"])
+			result[self.generateReference()] = {
+				'timestamp': ts,
+				'type': tl.ORDER_CANCEL,
+				'accepted': True,
+				'item': order
+			}
+
+			# Add update to handled
+			# self._handled[oanda_id] = result
+			handled_id = oanda_id
+
+		else:
+			positions = self.getDbPositions()
+			for trade in positions:
+				if trade["sl_id"] == order_id:
+					trade["sl"] = None
+					trade["sl_id"] = None
+
+					self.replaceDbOrder(trade)
+
+					result[self.generateReference()] = {
+						'timestamp': ts,
+						'type': tl.MODIFY,
+						'accepted': True,
+						'item': trade
+					}
+
+				elif trade["tp_id"] == order_id:
+					trade["tp"] = None
+					trade["tp_id"] = None
+
+					self.replaceDbOrder(trade)
+
+					result[self.generateReference()] = {
+						'timestamp': ts,
+						'type': tl.MODIFY,
+						'accepted': True,
+						'item': trade
+					}
+
+			if result:
+				# Add update to handled
+				# self._handled[oanda_id] = result
+				handled_id = oanda_id
+
+		return result, handled_id
+
+
+
+	def _handle_stop_loss_order(self, res):
+		oanda_id = res.get('id')
+		order_id = res.get('tradeID')
+		handled_id = None
+		pos = self.getPositionByID(order_id)
+
+		result = {}
+		if pos is not None:
+			ts = tl.convertTimeToTimestamp(datetime.strptime(
+				res.get('time').split('.')[0], '%Y-%m-%dT%H:%M:%S'
+			))
+
+			pos["sl"] = float(res.get('price'))
+			pos["sl_id"] = oanda_id
+
+			self.replaceDbPosition(pos)
+
+			result[self.generateReference()] = {
+				'timestamp': ts,
+				'type': tl.MODIFY,
+				'accepted': True,
+				'item': pos
+			}
+
+			# Add update to handled
+			# self._handled[oanda_id] = result
+			handled_id = oanda_id
+
+		return result, handled_id
+
+
+	def _handle_take_profit_order(self, res):
+		oanda_id = res.get('id')
+		order_id = res.get('tradeID')
+		handled_id = None
+		pos = self.getPositionByID(order_id)
+
+		result = {}
+		if pos is not None:
+			ts = tl.convertTimeToTimestamp(datetime.strptime(
+				res.get('time').split('.')[0], '%Y-%m-%dT%H:%M:%S'
+			))
+
+			pos["tp"] = float(res.get('price'))
+			pos["tp_id"] = oanda_id
+
+			self.replaceDbPosition(pos)
+
+			result[self.generateReference()] = {
+				'timestamp': ts,
+				'type': tl.MODIFY,
+				'accepted': True,
+				'item': pos
+			}
+
+			# Add update to handled
+			# self._handled[oanda_id] = result
+			handled_id = oanda_id
+
+		return result, handled_id
 
 
 	def createPosition(self,
@@ -730,6 +1031,88 @@ class Oanda(object):
 	def convertToUnitSize(self, size):
 		return size * 100000
 
+	def generateReference(self):
+		return shortuuid.uuid()
+
+	def getBrokerKey(self):
+		return self.strategyId + '.' + self.brokerId
+
+	def getDbPositions(self):
+		positions = self.container.redis_client.hget(self.getBrokerKey(), "positions")
+		if positions is None:
+			positions = []
+		else:
+			positions = json.loads(positions)
+		return positions
+
+	def setDbPositions(self, positions):
+		self.container.redis_client.hset(self.getBrokerKey(), "positions", json.dumps(positions))
+
+	def appendDbPosition(self, new_position):
+		positions = self.getDbPositions()
+		positions.append(new_position)
+		self.setDbPositions(positions)
+
+	def deleteDbPosition(self, order_id):
+		positions = self.getDbPositions()
+		for i in range(len(positions)):
+			if positions[i]["order_id"] == order_id:
+				del positions[i]
+				break
+		self.setDbPositions(positions)
+
+	def replaceDbPosition(self, position):
+		positions = self.getDbPositions()
+		for i in range(len(positions)):
+			if positions[i]["order_id"] == position["order_id"]:
+				positions[i] = position
+				break
+		self.setDbPositions(positions)
+
+	def getPositionByID(self, order_id):
+		for pos in self.getDbPositions():
+			if pos["order_id"] == order_id:
+				return pos
+		return None
+	
+	def getDbOrders(self):
+		orders = self.container.redis_client.hget(self.getBrokerKey(), "orders")
+		if orders is None:
+			orders = []
+		else:
+			orders = json.loads(orders)
+		return orders
+
+	def setDbOrders(self, orders):
+		self.container.redis_client.hset(self.getBrokerKey(), "orders", json.dumps(orders))
+
+	def appendDbOrder(self, new_order):
+		orders = self.getDbOrders()
+		orders.append(new_order)
+		self.setDbOrders(orders)
+
+	def deleteDbOrder(self, order_id):
+		orders = self.getDbOrders()
+		for i in range(len(orders)):
+			if orders[i]["order_id"] == order_id:
+				del orders[i]
+				break
+		self.setDbOrders(orders)
+
+	def replaceDbOrder(self, order):
+		orders = self.getDbOrders()
+		for i in range(len(orders)):
+			if orders[i]["order_id"] == order["order_id"]:
+				orders[i] = order
+				break
+		self.setDbOrders(orders)
+
+	def getOrderByID(self, order_id):
+		for order in self.getDbOrders():
+			if order["order_id"] == order_id:
+				return order
+		return None
+
 
 	# Live utilities
 	def _reconnect(self):
@@ -820,7 +1203,7 @@ class Oanda(object):
 			self._is_connected = True
 			self._last_update = time.time()
 
-		sub.onUpdate(sub.args[0], { 'type': 'connected', 'item': True })
+		# sub.onUpdate(sub.args[0], { 'type': 'connected', 'item': True })
 
 		while sub.receive:
 			try:
@@ -828,7 +1211,8 @@ class Oanda(object):
 				if not message.strip():
 					sub.receive = False
 				else:
-					sub.onUpdate(sub.args[0], json.loads(message))
+					# sub.onUpdate(sub.args[0], json.loads(message))
+					self._on_account_update(sub, sub.args[0], json.loads(message))
 
 			except Exception as e:
 				print(traceback.format_exc(), flush=True)
@@ -842,3 +1226,62 @@ class Oanda(object):
 
 		self._perform_account_connection(sub)
 
+
+	def _on_account_update(self, sub, account_id, update):
+		self._account_update_queue.append((sub, account_id, update))
+
+
+	def _handle_account_updates(self):
+
+		while True:
+			if len(self._account_update_queue):
+				sub, account_id, update = self._account_update_queue[0]
+				del self._account_update_queue[0]
+				
+				try:
+					handled_id = None
+					print(f'UPDATE: {account_id}, {update}')
+
+					res = {}
+					if update.get('type') == 'HEARTBEAT':
+						self._last_update = time.time()
+
+					# elif update.get('type') == 'connected':
+					# 	if not self.is_dummy and self.userAccount and self.brokerId:
+					# 		print(f'[_on_account_update] CONNECTED, Retrieving positions/orders')
+					# 		self._handle_live_strategy_setup()
+
+					# 		res = {
+					# 			self.generateReference(): {
+					# 				'timestamp': time.time(),
+					# 				'type': 'update',
+					# 				'accepted': True,
+					# 				'item': {
+					# 					'positions': self.positions,
+					# 					'orders': self.orders
+					# 				}
+					# 			}
+					# 		}
+
+					elif update.get('type') == 'ORDER_FILL':
+						res, handled_id = self._handle_order_fill(account_id, update)
+
+					elif update.get('type') == 'STOP_LOSS_ORDER':
+						res, handled_id = self._handle_stop_loss_order(update)
+
+					elif update.get('type') == 'TAKE_PROFIT_ORDER':
+						res, handled_id = self._handle_take_profit_order(update)
+
+					elif update.get('type') == 'LIMIT_ORDER' or update.get('type') == 'STOP_ORDER':
+						res, handled_id = self._handle_order_create(update)
+
+					elif update.get('type') == 'ORDER_CANCEL':
+						res, handled_id = self._handle_order_cancel(update)
+
+					if len(res):
+						sub.onUpdate(account_id, res, handled_id)
+
+				except Exception:
+					print(f"[_handle_account_updates] {traceback.format_exc()}")
+
+			time.sleep(0.1)

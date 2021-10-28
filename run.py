@@ -4,6 +4,8 @@ import os
 import json
 import traceback
 import time
+import shortuuid
+from redis import Redis
 from app.oanda import Oanda
 from app.db import Database
 
@@ -21,6 +23,8 @@ class UserContainer(object):
 		self.config = config
 		self.parent = None
 		self.users = {}
+		self.add_user_queue = []
+		self.redis_client = Redis(host='redis', port=6379, password="dev")
 
 
 	def getSio(self):
@@ -39,10 +43,10 @@ class UserContainer(object):
 		return self.parent
 
 
-	def addUser(self, user_id, broker_id, key, is_demo, accounts, is_parent, is_dummy):
+	def addUser(self, user_id, strategy_id, broker_id, key, is_demo, accounts, is_parent, is_dummy):
 		if broker_id not in self.users:
 			self.users[broker_id] = Oanda(
-				self, user_id, broker_id, key, is_demo, accounts, is_parent, is_dummy
+				self, user_id, strategy_id, broker_id, key, is_demo, accounts, is_parent, is_dummy
 			)
 			if is_parent:
 				self.parent = self.users[broker_id]
@@ -59,6 +63,17 @@ class UserContainer(object):
 
 	def getUser(self, broker_id):
 		return self.users.get(broker_id)
+
+	
+	def addToUserQueue(self):
+		_id = shortuuid.uuid()
+		self.add_user_queue.append(_id)
+		while self.add_user_queue[0] != _id:
+			time.sleep(0.1)
+
+
+	def popUserQueue(self):
+		del self.add_user_queue[0]
 
 
 def getConfig():
@@ -96,10 +111,16 @@ def sendResponse(msg_id, res):
 	)
 
 
-def onAddUser(user_id, broker_id, key, is_demo, accounts, is_parent, is_dummy):
-	user = user_container.addUser(
-		user_id, broker_id, key, is_demo, accounts, is_parent, is_dummy
-	)
+def onAddUser(user_id, strategy_id, broker_id, key, is_demo, accounts, is_parent, is_dummy):
+	user_container.addToUserQueue()
+	try:
+		user = user_container.addUser(
+			user_id, strategy_id, broker_id, key, is_demo, accounts, is_parent, is_dummy
+		)
+	except Exception:
+		print(traceback.format_exc())
+	finally:
+		user_container.popUserQueue()
 
 	return {
 		'completed': True
