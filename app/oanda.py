@@ -39,13 +39,41 @@ class Subscription(object):
 	def onUpdate(self, *args):
 		# print(f'ON UPDATE: {args}', flush=True)
 
-		self.broker._send_response(
-			self.msg_id,
-			{
-				'args': args,
-				'kwargs': {}
-			}
-		)
+		# self.broker._send_response(
+		# 	self.msg_id,
+		# 	{
+		# 		'args': args,
+		# 		'kwargs': {}
+		# 	}
+		# )
+
+		if self.sub_type == Subscription.CHART:
+			self.broker.container.zmq_req_socket.send_json({
+				"type": "price",
+				"message": {
+					"msg_id": self.msg_id,
+					"result": {
+						"args": args,
+						"kwargs": {}
+					}
+				}
+			})
+
+			# self.broker.container.zmq_req_socket.recv()
+
+		elif self.sub_type == Subscription.ACCOUNT:
+			self.broker.container.zmq_req_socket.send_json({
+				"type": "account",
+				"message": {
+					"msg_id": self.msg_id,
+					"result": {
+						"args": args,
+						"kwargs": {}
+					}
+				}
+			})
+
+			# self.broker.container.zmq_req_socket.recv()
 
 
 class Oanda(object):
@@ -118,17 +146,17 @@ class Oanda(object):
 		)
 
 
-	def _send_response(self, msg_id, res):
-		res = {
-			'msg_id': msg_id,
-			'result': res
-		}
+	# def _send_response(self, msg_id, res):
+	# 	res = {
+	# 		'msg_id': msg_id,
+	# 		'result': res
+	# 	}
 
-		self.container.sio.emit(
-			'broker_res', 
-			res, 
-			namespace='/broker'
-		)
+	# 	self.container.sio.emit(
+	# 		'broker_res', 
+	# 		res, 
+	# 		namespace='/broker'
+	# 	)
 
 
 	def _download_historical_data_broker(self, 
@@ -407,7 +435,7 @@ class Oanda(object):
 		return result, handled_id
 
 
-	def _handle_order_fill(self, account_id, res):
+	def _handle_order_fill(self, account_id, res, sub):
 		# Retrieve position information
 		oanda_id = res.get('id')
 		result = {}
@@ -420,14 +448,26 @@ class Oanda(object):
 		if from_order is not None:
 			self.deleteDbOrder(from_order["order_id"])
 
-			self.handleOnTrade(account_id, {
-				self.generateReference(): {
-					'timestamp': from_order["close_time"],
-					'type': tl.ORDER_CANCEL,
-					'accepted': True,
-					'item': from_order
-				}
-			})
+			sub.onUpdate(
+				account_id, 
+				{
+					self.generateReference(): {
+						'timestamp': from_order["close_time"],
+						'type': tl.ORDER_CANCEL,
+						'accepted': True,
+						'item': from_order
+					}
+				}, 
+				None
+			)
+			# self.handleOnTrade(account_id, {
+			# 	self.generateReference(): {
+			# 		'timestamp': from_order["close_time"],
+			# 		'type': tl.ORDER_CANCEL,
+			# 		'accepted': True,
+			# 		'item': from_order
+			# 	}
+			# })
 
 		if res.get('tradeOpened'):
 			order_id = res['tradeOpened'].get('tradeID')
@@ -579,6 +619,34 @@ class Oanda(object):
 
 		return result, handled_id
 
+
+	# def _handle_trades(self, trades):
+	# 	new_positions = []
+	# 	new_orders = []
+
+	# 	for i in trades:
+	# 		account_id = str(i["AccountId"])
+	# 		if i.get("Type") == "Position":
+	# 			new_pos = self._convert_fxo_position(account_id, i)
+	# 			new_positions.append(new_pos)
+	# 		elif i.get("Type") == "Limit" or i.get("Type") == "Stop":
+	# 			new_order = self._convert_fxo_order(account_id, i)
+	# 			new_orders.append(new_order)
+
+	# 	self.setDbPositions(new_positions)
+	# 	self.setDbOrders(new_orders)
+
+	# 	return {
+	# 		self.generateReference(): {
+	# 			'timestamp': time.time(),
+	# 			'type': tl.UPDATE,
+	# 			'accepted': True,
+	# 			'item': {
+	# 				"positions": new_positions,
+	# 				"orders": new_orders
+	# 			}
+	# 		}
+	# 	}
 
 
 	def _handle_stop_loss_order(self, res):
@@ -1232,15 +1300,15 @@ class Oanda(object):
 
 
 	def _handle_account_updates(self):
-
+		update_check = time.time()
 		while True:
 			if len(self._account_update_queue):
 				sub, account_id, update = self._account_update_queue[0]
 				del self._account_update_queue[0]
-				
+
 				try:
 					handled_id = None
-					print(f'UPDATE: {account_id}, {update}')
+					print(f'UPDATE: {account_id}, {update}', flush=True)
 
 					res = {}
 					if update.get('type') == 'HEARTBEAT':
@@ -1264,7 +1332,7 @@ class Oanda(object):
 					# 		}
 
 					elif update.get('type') == 'ORDER_FILL':
-						res, handled_id = self._handle_order_fill(account_id, update)
+						res, handled_id = self._handle_order_fill(account_id, update, sub)
 
 					elif update.get('type') == 'STOP_LOSS_ORDER':
 						res, handled_id = self._handle_stop_loss_order(update)
@@ -1282,6 +1350,9 @@ class Oanda(object):
 						sub.onUpdate(account_id, res, handled_id)
 
 				except Exception:
-					print(f"[_handle_account_updates] {traceback.format_exc()}")
+					print(f"[_handle_account_updates] {traceback.format_exc()}", flush=True)
 
-			time.sleep(0.1)
+			if time.time() - update_check > 30:
+				pass
+
+			time.sleep(0.01)
