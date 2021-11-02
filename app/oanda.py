@@ -48,7 +48,7 @@ class Subscription(object):
 		# )
 
 		if self.sub_type == Subscription.CHART:
-			self.broker.container.zmq_req_socket.send_json({
+			self.broker.container.send_queue.append({
 				"type": "price",
 				"message": {
 					"msg_id": self.msg_id,
@@ -62,7 +62,8 @@ class Subscription(object):
 			# self.broker.container.zmq_req_socket.recv()
 
 		elif self.sub_type == Subscription.ACCOUNT:
-			self.broker.container.zmq_req_socket.send_json({
+			print(f"[onUpdate] Send {args}", flush=True)
+			self.broker.container.send_queue.append({
 				"type": "account",
 				"message": {
 					"msg_id": self.msg_id,
@@ -1192,10 +1193,31 @@ class Oanda(object):
 		return urlencode(dict([(k, v) for (k, v) in iter(params.items()) if v]))
 
 
+	def _get_chart_subscription_msg_id(self, sub_type, product):
+		for sub in copy(self._subscriptions):
+			if sub.sub_type == sub_type and product in sub.args[0]:
+				return sub.msg_id
+		return None
+
+
+	def _get_account_subscription_msg_id(self, sub_type):
+		for sub in copy(self._subscriptions):
+			if sub.sub_type == sub_type:
+				return sub.msg_id
+		return None
+		
+
 	def _subscribe_chart_updates(self, msg_id, product):
-		sub = Subscription(self, msg_id, Subscription.CHART, [product])
-		self._subscriptions.append(sub)
-		self._perform_chart_connection(sub)	
+		existing_msg_id = self._get_chart_subscription_msg_id(Subscription.CHART)
+		
+		if existing_msg_id is None:
+			sub = Subscription(self, msg_id, Subscription.CHART, [product])
+			self._subscriptions.append(sub)
+			self._perform_chart_connection(sub)	
+		else:
+			msg_id = existing_msg_id
+		
+		return msg_id
 
 
 	def _perform_chart_connection(self, sub):
@@ -1238,9 +1260,16 @@ class Oanda(object):
 
 	def _subscribe_account_updates(self, msg_id, account_id):
 		print(f'SUBSCRIBE ACCOUNT: {msg_id}, {account_id}', flush=True)
-		sub = Subscription(self, msg_id, Subscription.ACCOUNT, account_id)
-		self._subscriptions.append(sub)
-		self._perform_account_connection(sub)
+		existing_msg_id = self._get_account_subscription_msg_id(Subscription.ACCOUNT)
+		
+		if existing_msg_id is None:
+			sub = Subscription(self, msg_id, Subscription.ACCOUNT, account_id)
+			self._subscriptions.append(sub)
+			self._perform_account_connection(sub)
+		else:
+			msg_id = existing_msg_id
+
+		return msg_id
 
 
 	def _perform_account_connection(self, sub):
